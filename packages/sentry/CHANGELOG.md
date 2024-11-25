@@ -1,5 +1,11 @@
 # @hono/sentry
 
+## 1.2.1
+
+### Patch Changes
+
+- [`73a2eb6d5888080dfdb41ec8cb9a114e2d471376`](https://github.com/honojs/middleware/commit/73a2eb6d5888080dfdb41ec8cb9a114e2d471376) Thanks [@MathurAditya724](https://github.com/MathurAditya724)! - Added generic types
+
 ## 1.2.0
 
 ### Minor Changes
