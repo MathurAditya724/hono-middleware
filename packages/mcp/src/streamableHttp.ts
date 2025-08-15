@@ -15,7 +15,6 @@ import type {
   RequestInfo,
 } from '@modelcontextprotocol/sdk/types.js'
 import {
-  DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
   isInitializeRequest,
   isJSONRPCError,
   isJSONRPCRequest,
@@ -23,10 +22,79 @@ import {
   JSONRPCMessageSchema,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from '@modelcontextprotocol/sdk/types.js'
+
+// Fallback constant if not available in current SDK version
+const DEFAULT_NEGOTIATED_PROTOCOL_VERSION = '2025-03-26'
 import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { SSEStreamingApi } from 'hono/streaming'
 import { streamSSE } from './streaming'
+
+/**
+ * Simple in-memory implementation of EventStore for resumability
+ */
+class MemoryEventStore implements EventStore {
+  private events = new Map<string, { id: string; message: JSONRPCMessage }[]>()
+  private eventCounter = 0
+
+  async storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
+    const eventId = (++this.eventCounter).toString()
+
+    if (!this.events.has(streamId)) {
+      this.events.set(streamId, [])
+    }
+
+    this.events.get(streamId)!.push({ id: eventId, message })
+
+    // Keep only last 1000 events per stream to prevent memory leak
+    const streamEvents = this.events.get(streamId)!
+    if (streamEvents.length > 1000) {
+      streamEvents.splice(0, streamEvents.length - 1000)
+    }
+
+    return eventId
+  }
+
+  async replayEventsAfter(
+    lastEventId: string,
+    sender: { send: (eventId: string, message: JSONRPCMessage) => Promise<void> }
+  ): Promise<string> {
+    const streamId = this.findStreamByEventId(lastEventId)
+    if (!streamId || !this.events.has(streamId)) {
+      return streamId || '_unknown_stream'
+    }
+
+    const streamEvents = this.events.get(streamId)!
+    const lastEventIndex = streamEvents.findIndex((event) => event.id === lastEventId)
+
+    if (lastEventIndex === -1) {
+      // Event not found, replay all events
+      for (const event of streamEvents) {
+        await sender.send(event.id, event.message)
+      }
+    } else {
+      // Replay events after the specified event ID
+      for (const event of streamEvents.slice(lastEventIndex + 1)) {
+        await sender.send(event.id, event.message)
+      }
+    }
+
+    return streamId
+  }
+
+  private findStreamByEventId(eventId: string): string | undefined {
+    for (const [streamId, events] of this.events.entries()) {
+      if (events.some((event) => event.id === eventId)) {
+        return streamId
+      }
+    }
+    return undefined
+  }
+
+  clearStream(streamId: string): void {
+    this.events.delete(streamId)
+  }
+}
 
 export class StreamableHTTPTransport implements Transport {
   #started = false
@@ -45,6 +113,10 @@ export class StreamableHTTPTransport implements Transport {
         json: (data: unknown) => void
       }
       stream?: SSEStreamingApi
+      writeQueue?: Promise<void>
+      queueCount: number
+      writing: boolean
+      cleaned: boolean
     }
   >()
   #requestToStreamMapping = new Map<RequestId, string>()
@@ -52,21 +124,34 @@ export class StreamableHTTPTransport implements Transport {
   #allowedHosts?: string[]
   #allowedOrigins?: string[]
   #enableDnsRebindingProtection: boolean
+  #maxQueueSize: number
+  #maxMessageSize: number
 
   sessionId?: string
   onclose?: () => void
   onerror?: (error: Error) => void
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void
 
-  constructor(options?: StreamableHTTPServerTransportOptions) {
+  constructor(
+    options?: StreamableHTTPServerTransportOptions & {
+      maxQueueSize?: number
+      maxMessageSize?: number
+      onsessionclosed?: (sessionId: string) => void
+      allowedHosts?: string[]
+      allowedOrigins?: string[]
+      enableDnsRebindingProtection?: boolean
+    }
+  ) {
     this.#sessionIdGenerator = options?.sessionIdGenerator
     this.#enableJsonResponse = options?.enableJsonResponse ?? false
-    this.#eventStore = options?.eventStore
+    this.#eventStore = options?.eventStore ?? new MemoryEventStore()
     this.#onSessionInitialized = options?.onsessioninitialized
     this.#onSessionClosed = options?.onsessionclosed
     this.#allowedHosts = options?.allowedHosts
     this.#allowedOrigins = options?.allowedOrigins
     this.#enableDnsRebindingProtection = options?.enableDnsRebindingProtection ?? false
+    this.#maxQueueSize = options?.maxQueueSize ?? 100
+    this.#maxMessageSize = options?.maxMessageSize ?? 1024 * 1024 // 1MB
   }
 
   /**
@@ -81,7 +166,88 @@ export class StreamableHTTPTransport implements Transport {
   }
 
   /**
-   * Validates request headers for DNS rebinding protection.
+   * Writes an SSE event with proper formatting (unified method like official SDK)
+   */
+  #writeSSEEvent(
+    stream: SSEStreamingApi,
+    message: JSONRPCMessage,
+    eventId?: string
+  ): Promise<void> {
+    return stream.writeSSE({
+      id: eventId,
+      event: 'message',
+      data: JSON.stringify(message),
+    })
+  }
+
+  /**
+   * Queues SSE writes to prevent concurrent write issues
+   */
+  async #queueWrite(streamId: string, writeFn: () => Promise<void>): Promise<void> {
+    const streamEntry = this.#streamMapping.get(streamId)
+    if (!streamEntry) {
+      throw new Error(`Stream ${streamId} not found`)
+    }
+
+    // Check queue size limit
+    if (streamEntry.queueCount >= this.#maxQueueSize) {
+      throw new Error(`Queue size limit exceeded for stream ${streamId}`)
+    }
+
+    // Prevent reentrancy - if already writing, wait for current write to complete
+    if (streamEntry.writing) {
+      console.debug(`[SSE] Write already in progress for stream ${streamId}, queueing`)
+    }
+
+    streamEntry.queueCount = (streamEntry.queueCount || 0) + 1
+
+    const currentWrite = streamEntry.writeQueue || Promise.resolve()
+    const startTime = Date.now()
+
+    const newWrite = currentWrite
+      .then(async () => {
+        // Set writing flag to prevent reentrancy
+        const entry = this.#streamMapping.get(streamId)
+        if (entry) {
+          entry.writing = true
+        }
+
+        console.debug(`[SSE] Starting write for stream ${streamId}`)
+        await writeFn()
+        console.debug(`[SSE] Completed write for stream ${streamId} in ${Date.now() - startTime}ms`)
+      })
+      .catch((error) => {
+        console.error(`[SSE] Write error for stream ${streamId}:`, error)
+        this.onerror?.(error as Error)
+      })
+      .finally(() => {
+        // Clean up completed write if it's the current one
+        const currentEntry = this.#streamMapping.get(streamId)
+        if (currentEntry) {
+          currentEntry.writing = false
+          currentEntry.queueCount = Math.max(0, (currentEntry.queueCount || 0) - 1)
+          if (currentEntry.writeQueue === newWrite) {
+            delete currentEntry.writeQueue
+          }
+        }
+      })
+
+    streamEntry.writeQueue = newWrite
+    await newWrite
+  }
+
+  /**
+   * Normalizes a host header value for comparison (simplified version based on official SDK)
+   */
+  #normalizeHost(host: string | undefined): string | undefined {
+    if (!host) {
+      return undefined
+    }
+    return host.trim().toLowerCase()
+  }
+
+  /**
+   * Validates request headers for DNS rebinding protection (simplified based on official SDK).
    * @returns Error message if validation fails, undefined if validation passes.
    */
   #validateRequestHeaders(ctx: Context): string | undefined {
@@ -164,7 +330,10 @@ export class StreamableHTTPTransport implements Transport {
       // clients using the Streamable HTTP transport MUST include it
       // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
       this.#validateSession(ctx)
-      this.#validateProtocolVersion(ctx)
+      // Only validate protocol version if session management is enabled
+      if (this.#sessionIdGenerator !== undefined) {
+        this.#validateProtocolVersion(ctx)
+      }
 
       // After initialization, always include the session ID if we have one
       if (this.sessionId !== undefined) {
@@ -178,23 +347,21 @@ export class StreamableHTTPTransport implements Transport {
       if (this.#eventStore) {
         const lastEventId = ctx.req.header('last-event-id')
         if (lastEventId) {
-          streamId = (stream) =>
-            this.#eventStore!.replayEventsAfter(lastEventId, {
-              send: async (eventId: string, message: JSONRPCMessage) => {
-                try {
-                  await stream.writeSSE({
-                    id: eventId,
-                    event: 'message',
-                    data: JSON.stringify(message),
-                  })
-                } catch {
-                  this.onerror?.(new Error('Failed replay events'))
-                  throw new HTTPException(500, {
-                    message: 'Failed replay events',
-                  })
-                }
-              },
-            })
+          streamId = async (stream) => {
+            try {
+              const resolvedStreamId = await this.#eventStore!.replayEventsAfter(lastEventId, {
+                send: async (eventId: string, message: JSONRPCMessage) => {
+                  await this.#writeSSEEvent(stream, message, eventId)
+                },
+              })
+              return resolvedStreamId
+            } catch (error) {
+              this.onerror?.(new Error('Failed replay events'))
+              throw new HTTPException(500, {
+                message: 'Failed replay events',
+              })
+            }
+          }
         }
       }
 
@@ -220,6 +387,9 @@ export class StreamableHTTPTransport implements Transport {
         this.#streamMapping.set(resolvedStreamId, {
           ctx,
           stream,
+          queueCount: 0,
+          writing: false,
+          cleaned: false,
         })
 
         // Keep connection alive
@@ -233,7 +403,15 @@ export class StreamableHTTPTransport implements Transport {
 
         // Set up close handler for client disconnects
         stream.onAbort(() => {
-          this.#streamMapping.delete(resolvedStreamId)
+          const entry = this.#streamMapping.get(resolvedStreamId)
+          if (entry && !entry.cleaned) {
+            entry.cleaned = true
+            this.#streamMapping.delete(resolvedStreamId)
+            // Clear EventStore for this stream
+            if (this.#eventStore instanceof MemoryEventStore) {
+              this.#eventStore.clearStream(resolvedStreamId)
+            }
+          }
           clearInterval(keepAlive)
         })
       })
@@ -303,7 +481,38 @@ export class StreamableHTTPTransport implements Transport {
 
       let rawMessage = parsedBody
       if (rawMessage === undefined) {
-        rawMessage = await ctx.req.json()
+        const bodyText = await ctx.req.text()
+
+        // Check message size limit (using TextEncoder for accurate multi-byte character measurement)
+        const bodyBytes = new TextEncoder().encode(bodyText).length
+        if (bodyBytes > this.#maxMessageSize) {
+          throw new HTTPException(413, {
+            res: Response.json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32000,
+                message: 'Request entity too large',
+              },
+              id: null,
+            }),
+          })
+        }
+
+        try {
+          rawMessage = JSON.parse(bodyText)
+        } catch (error) {
+          throw new HTTPException(400, {
+            res: Response.json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32700,
+                message: 'Parse error',
+                data: String(error),
+              },
+              id: null,
+            }),
+          })
+        }
       }
 
       let messages: JSONRPCMessage[]
@@ -352,7 +561,21 @@ export class StreamableHTTPTransport implements Transport {
         // If we have a session ID and an onsessioninitialized handler, call it immediately
         // This is needed in cases where the server needs to keep track of multiple sessions
         if (this.sessionId && this.#onSessionInitialized) {
-          this.#onSessionInitialized(this.sessionId)
+          try {
+            await Promise.resolve(this.#onSessionInitialized(this.sessionId))
+          } catch (error) {
+            throw new HTTPException(400, {
+              res: Response.json({
+                jsonrpc: '2.0',
+                error: {
+                  code: -32000,
+                  message: 'Bad Request: Session initialization failed',
+                  data: String(error),
+                },
+                id: null,
+              }),
+            })
+          }
         }
       }
 
@@ -362,7 +585,9 @@ export class StreamableHTTPTransport implements Transport {
         // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
         this.#validateSession(ctx)
         // Mcp-Protocol-Version header is required for all requests after initialization.
-        this.#validateProtocolVersion(ctx)
+        if (this.#sessionIdGenerator !== undefined) {
+          this.#validateProtocolVersion(ctx)
+        }
       }
 
       // check if it contains requests
@@ -390,14 +615,17 @@ export class StreamableHTTPTransport implements Transport {
         if (this.#enableJsonResponse) {
           // Store the response for this request to send messages back through this connection
           // We need to track by request ID to maintain the connection
-          const result = await new Promise<any>((resolve) => {
+          const result = await new Promise<JSONRPCMessage | JSONRPCMessage[]>((resolve) => {
             for (const message of messages) {
               if (isJSONRPCRequest(message)) {
                 this.#streamMapping.set(streamId, {
                   ctx: {
                     header: ctx.header,
-                    json: resolve,
+                    json: resolve as (data: unknown) => void,
                   },
+                  queueCount: 0,
+                  writing: false,
+                  cleaned: false,
                 })
                 this.#requestToStreamMapping.set(message.id, streamId)
               }
@@ -420,6 +648,9 @@ export class StreamableHTTPTransport implements Transport {
               this.#streamMapping.set(streamId, {
                 ctx,
                 stream,
+                queueCount: 0,
+                writing: false,
+                cleaned: false,
               })
               this.#requestToStreamMapping.set(message.id, streamId)
             }
@@ -427,7 +658,20 @@ export class StreamableHTTPTransport implements Transport {
 
           // Set up close handler for client disconnects
           stream.onAbort(() => {
-            this.#streamMapping.delete(streamId)
+            const entry = this.#streamMapping.get(streamId)
+            if (entry && !entry.cleaned) {
+              entry.cleaned = true
+              this.#streamMapping.delete(streamId)
+              // Clean up request mappings for this stream
+              const relatedIds = Array.from(this.#requestToStreamMapping.entries())
+                .filter(([, sid]) => sid === streamId)
+                .map(([id]) => id)
+
+              for (const id of relatedIds) {
+                this.#requestToStreamMapping.delete(id)
+                this.#requestResponseMap.delete(id)
+              }
+            }
           })
 
           // handle each message
@@ -465,10 +709,27 @@ export class StreamableHTTPTransport implements Transport {
    */
   private async handleDeleteRequest(ctx: Context) {
     this.#validateSession(ctx)
-    this.#validateProtocolVersion(ctx)
+    if (this.#sessionIdGenerator !== undefined) {
+      this.#validateProtocolVersion(ctx)
+    }
 
-    if (this.#onSessionClosed && this.sessionId)
-      await Promise.resolve(this.#onSessionClosed(this.sessionId))
+    if (this.#onSessionClosed && this.sessionId) {
+      try {
+        await Promise.resolve(this.#onSessionClosed(this.sessionId))
+      } catch (error) {
+        throw new HTTPException(500, {
+          res: Response.json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: 'Internal Server Error: Session closure failed',
+              data: String(error),
+            },
+            id: null,
+          }),
+        })
+      }
+    }
 
     await this.close()
     return ctx.body(null, 200)
@@ -574,7 +835,7 @@ export class StreamableHTTPTransport implements Transport {
     }
 
     if (!SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {
-      throw new HTTPException(404, {
+      throw new HTTPException(400, {
         res: Response.json({
           jsonrpc: '2.0',
           error: {
@@ -588,6 +849,33 @@ export class StreamableHTTPTransport implements Transport {
     return true
   }
 
+  /**
+   * Gets debug information about the transport state (for testing purposes)
+   */
+  getDebugInfo(): {
+    hasEventStore: boolean
+    streamCount: number
+    requestMappingCount: number
+    responseMapCount: number
+    writeQueueCount: number
+    initialized: boolean
+    sessionId?: string
+  } {
+    const writeQueueCount = Array.from(this.#streamMapping.values()).filter(
+      (entry) => entry.writeQueue
+    ).length
+
+    return {
+      hasEventStore: !!this.#eventStore,
+      streamCount: this.#streamMapping.size,
+      requestMappingCount: this.#requestToStreamMapping.size,
+      responseMapCount: this.#requestResponseMap.size,
+      writeQueueCount,
+      initialized: this.#initialized,
+      sessionId: this.sessionId,
+    }
+  }
+
   async close(): Promise<void> {
     // Close all SSE connections
 
@@ -599,6 +887,7 @@ export class StreamableHTTPTransport implements Transport {
 
     // Clear any pending responses
     this.#requestResponseMap.clear()
+
     this.onclose?.()
   }
 
@@ -626,18 +915,27 @@ export class StreamableHTTPTransport implements Transport {
         return
       }
 
-      // Generate and store event ID if event store is provided
-      let eventId: string | undefined
-      if (this.#eventStore) {
-        // Stores the event and gets the generated event ID
-        eventId = await this.#eventStore.storeEvent(this.#standaloneSseStreamId, message)
-      }
+      // Queue the write to prevent concurrent write issues
+      return this.#queueWrite(this.#standaloneSseStreamId, async () => {
+        // Generate and store event ID if event store is provided
+        let eventId: string | undefined
+        if (this.#eventStore) {
+          // Stores the event and gets the generated event ID
+          eventId = await this.#eventStore.storeEvent(this.#standaloneSseStreamId, message)
+        }
 
-      // Send the message to the standalone SSE stream
-      return standaloneSse.stream?.writeSSE({
-        id: eventId,
-        event: 'message',
-        data: JSON.stringify(message),
+        // Send the message to the standalone SSE stream
+        if (standaloneSse.stream?.closed) {
+          console.debug(`[SSE] Stream ${this.#standaloneSseStreamId} is closed, skipping write`)
+          return
+        }
+
+        console.debug(
+          `[SSE] Writing to stream ${this.#standaloneSseStreamId}:`,
+          JSON.stringify(message)
+        )
+        await this.#writeSSEEvent(standaloneSse.stream!, message, eventId)
+        console.debug(`[SSE] Successfully wrote to stream ${this.#standaloneSseStreamId}`)
       })
     }
 
@@ -649,19 +947,20 @@ export class StreamableHTTPTransport implements Transport {
     }
 
     if (!this.#enableJsonResponse) {
-      // For SSE responses, generate event ID if event store is provided
-      let eventId: string | undefined
-
-      if (this.#eventStore) {
-        eventId = await this.#eventStore.storeEvent(streamId, message)
-      }
-
       if (response) {
-        // Write the event to the response stream
-        await response.stream?.writeSSE({
-          id: eventId,
-          event: 'message',
-          data: JSON.stringify(message),
+        // Queue the write to prevent concurrent write issues
+        await this.#queueWrite(streamId, async () => {
+          // For SSE responses, generate event ID if event store is provided
+          let eventId: string | undefined
+
+          if (this.#eventStore) {
+            eventId = await this.#eventStore.storeEvent(streamId, message)
+          }
+
+          // Write the event to the response stream
+          if (response.stream && !response.stream.closed) {
+            await this.#writeSSEEvent(response.stream, message, eventId)
+          }
         })
       }
     }
