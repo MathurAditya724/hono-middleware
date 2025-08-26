@@ -1,5 +1,15 @@
 # @hono/mcp
 
+## 0.2.0
+
+### Minor Changes
+
+- [`21ff4345067555dcebc34a53b07a2e96abb1dc5b`](https://github.com/honojs/middleware/commit/21ff4345067555dcebc34a53b07a2e96abb1dc5b) Thanks [@MathurAditya724](https://github.com/MathurAditya724)! - Minor improvements and added support for Auth and SSE
+
+### Patch Changes
+
+- [#1342](https://github.com/honojs/middleware/pull/1342) [`6658a4e451ab306ba6e14cfc961db6af4d6da844`](https://github.com/honojs/middleware/commit/6658a4e451ab306ba6e14cfc961db6af4d6da844) Thanks [@inverted-capital](https://github.com/inverted-capital)! - SSE keepalive timers cleaned up on close
+
 ## 0.1.1
 
 ### Patch Changes
