@@ -84,11 +84,11 @@
     "description": "bigsur.ai is a web crawler operated by Big Sur AI that fetches website content to enable AI-powered web agents, sales assistants, and content marketing solutions for businesses. More info can be found at https://darkvisitors.com/agents/agents/bigsur-ai"
   },
   "Brightbot 1.0": {
-    "operator": "Browsing.ai",
+    "operator": "https://brightdata.com/brightbot",
     "respect": "Unclear at this time.",
     "function": "LLM/AI training.",
-    "frequency": "Unclear at this time.",
-    "description": "Scrapes data to train LLMs and AI products focused on website customer support."
+    "frequency": "At least one per minute.",
+    "description": "Scrapes data to train LLMs and AI products focused on website customer support, [uses residential IPs and legit-looking user-agents to disguise itself](https://ksol.io/en/blog/posts/brightbot-not-that-bright/)."
   },
   "Bytespider": {
     "operator": "ByteDance",
@@ -188,6 +188,13 @@
     "frequency": "Unclear at this time.",
     "description": "Datenbank Crawler is an AI data scraper operated by Datenbank. It's not currently known to be artificially intelligent or AI-related. If you think that's incorrect or can provide more detail about its purpose, please contact us. More info can be found at https://darkvisitors.com/agents/agents/datenbank-crawler"
   },
+  "DeepSeekBot": {
+    "operator": "DeepSeek",
+    "respect": "Unclear at this time.",
+    "function": "Training language models and improving AI products",
+    "frequency": "Unclear at this time.",
+    "description": "DeepSeekBot is a web crawler used by DeepSeek to train its language models and improve its AI products."
+  },
   "Devin": {
     "operator": "Devin AI",
     "respect": "Unclear at this time.",
@@ -279,8 +286,22 @@
     "frequency": "No information.",
     "description": "Used to train Gemini and Vertex AI generative APIs. Does not impact a site's inclusion or ranking in Google Search."
   },
-  "GoogleAgent-Mariner": {
+  "Google-Firebase": {
+    "operator": "Google",
+    "respect": "Unclear at this time.",
+    "function": "Used as part of AI apps developed by users of Google's Firebase AI products.",
+    "frequency": "Unclear at this time.",
+    "description": "Supports Google's Firebase AI products."
+  },
+  "Google-NotebookLM": {
     "operator": "Unclear at this time.",
+    "respect": "Unclear at this time.",
+    "function": "AI Assistants",
+    "frequency": "Unclear at this time.",
+    "description": "Google-NotebookLM is an AI-powered research and note-taking assistant that helps users synthesize information from their own uploaded sources, such as documents, transcripts, or web content. It can generate summaries, answer questions, and highlight key themes from the materials you provide, acting like a personalized research companion built on Google's Gemini model. Google-NotebookLM fetches source URLs when users add them to their notebooks, enabling the AI to access and analyze those pages for context and insights. More info can be found at https://darkvisitors.com/agents/agents/google-notebooklm"
+  },
+  "GoogleAgent-Mariner": {
+    "operator": "Google",
     "respect": "Unclear at this time.",
     "function": "AI Agents",
     "frequency": "Unclear at this time.",
@@ -390,6 +411,13 @@
     "function": "AI Assistants",
     "frequency": "Unclear at this time.",
     "description": "Meta-ExternalFetcher is dispatched by Meta AI products in response to user prompts, when they need to fetch an individual links. More info can be found at https://darkvisitors.com/agents/agents/meta-externalfetcher"
+  },
+  "meta-webindexer": {
+    "operator": "[Meta](https://developers.facebook.com/docs/sharing/webmasters/web-crawlers/)",
+    "respect": "Unclear at this time.",
+    "function": "AI Assistants",
+    "frequency": "Unhinged, more than 1 per second.",
+    "description": "As per their documentation, \"The Meta-WebIndexer crawler navigates the web to improve Meta AI search result quality for users. In doing so, Meta analyzes online content to enhance the relevance and accuracy of Meta AI. Allowing Meta-WebIndexer in your robots.txt file helps us cite and link to your content in Meta AI's responses.\""
   },
   "MistralAI-User": {
     "operator": "Mistral",
@@ -566,12 +594,26 @@
     "frequency": "Roughly once every 10 seconds.",
     "description": "Data collected is used for the SEO Writing Assistant tool to check if URL is accessible."
   },
+  "ShapBot": {
+    "operator": "[Parallel](https://parallel.ai)",
+    "respect": "[Yes](https://docs.parallel.ai/features/crawler)",
+    "function": "Collects data for Parallel's web APIs.",
+    "frequency": "Unclear at this time.",
+    "description": "ShapBot helps discover and index websites for Parallel's web APIs."
+  },
   "Sidetrade indexer bot": {
     "description": "AI product training.",
     "frequency": "No information.",
     "function": "Extracts data for a variety of uses including training AI.",
     "operator": "[Sidetrade](https://www.sidetrade.com)",
     "respect": "Unclear at this time."
+  },
+  "TerraCotta": {
+    "operator": "[Ceramic AI](https://ceramic.ai/)",
+    "respect": "[Yes](https://github.com/CeramicTeam/CeramicTerracotta)",
+    "function": "AI Agents",
+    "frequency": "Unclear at this time.",
+    "description": "Downloads data to train LLMs."
   },
   "Thinkbot": {
     "operator": "[Thinkbot](https://www.thinkbot.agency)",
