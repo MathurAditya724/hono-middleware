@@ -1,5 +1,11 @@
 # @hono/mcp
 
+## 0.3.0
+
+### Minor Changes
+
+- [`21ff4345067555dcebc34a53b07a2e96abb1dc5b`](https://github.com/honojs/middleware/commit/21ff4345067555dcebc34a53b07a2e96abb1dc5b) Thanks [@MathurAditya724](https://github.com/MathurAditya724)! - Minor improvements and added support for Auth
+
 ## 0.1.5
 
 ### Patch Changes
