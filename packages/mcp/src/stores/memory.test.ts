@@ -409,7 +409,7 @@ describe('MemoryEventStore', () => {
       expect(sentEventsStream2).toEqual([msg4])
     })
 
-    it('should maintain event order correctly', async () => {
+    it('somethign', async () => {
       const messages: JSONRPCMessage[] = []
       for (let i = 0; i < 10; i++) {
         messages.push({ jsonrpc: '2.0', method: `test${i}` })
