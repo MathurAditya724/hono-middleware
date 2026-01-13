@@ -81,6 +81,7 @@ jobs:
       - uses: MathurAditya724/codecov-action@main
         if: ${{ matrix.package != 'eslint-config' && matrix.package != 'qwik-city' && matrix.package != 'react-compat' }}
         with:
+          base-branch: test-1
           token: ${{ secrets.GITHUB_TOKEN }}
           post-pr-comment: true
           fail-ci-if-error: true
