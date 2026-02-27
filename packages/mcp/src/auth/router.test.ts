@@ -425,7 +425,9 @@ describe('MCP Auth Router with string issuerUrl', () => {
         return undefined
       },
 
-      async registerClient(client: OAuthClientInformationFull): Promise<OAuthClientInformationFull> {
+      async registerClient(
+        client: OAuthClientInformationFull
+      ): Promise<OAuthClientInformationFull> {
         return client
       },
     },
